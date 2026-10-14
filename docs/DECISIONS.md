@@ -51,3 +51,39 @@ One short entry per non-obvious choice: what, why, alternatives.
   cash amounts.
 - **Alternatives:** Cash amounts only. Near-miss tests ("a 10% drawdown",
   "risk 1% per trade") guard against over-flagging.
+
+## Guardrails copied from inbox-triage, trimmed to this project
+
+- **What:** `RateLimiter`, `AuditLogger` and `sanitize_for_prompt` were copied. `ApprovalGate`
+  and the "forward all emails to" injection pattern were left out.
+- **Why:** This agent has no send path to gate, and email forwarding isn't a threat in a
+  topic sheet. Keeping them would be dead code. The whitespace-tolerant `\s+` patterns and
+  their tests were kept.
+- **Alternatives:** Copy everything verbatim. That is simpler to diff against the source
+  but carries unused code.
+
+## Typed audit log methods instead of free-form kwargs
+
+- **What:** `AuditLogger.log_row(result)` and `log_event(event, detail)` write a fixed
+  set of fields.
+- **Why:** The log can only contain fields named in code, so a credential can't be passed
+  in by accident, and every row line has the same shape (row id, outcome, flags, model,
+  timestamp).
+- **Alternatives:** A generic `log(event, **details)` as in inbox-triage. It is more
+  flexible but easier to misuse.
+
+## Testability through injection, not monkeypatching
+
+- **What:** `load_settings(env)` takes a mapping, and `RateLimiter` takes a `clock`.
+- **Why:** Tests stay free of global state: no `os.environ` edits, no poking private
+  timestamps.
+- **Alternatives:** `monkeypatch.setenv` and mutating `_timestamps`, which is what the
+  sibling repo's tests do.
+
+## Result invariants enforced in the model
+
+- **What:** `RowResult` rejects impossible states: Drafted without a draft, Flagged or
+  Error with draft text, Error without a message, or any human-owned status.
+- **Why:** "Flagged rows get no draft text" and "the agent never sets Approved" become
+  facts the type guarantees rather than conventions each caller must remember.
+- **Alternatives:** Check these only in the pipeline. That is easier to bypass from new code.
