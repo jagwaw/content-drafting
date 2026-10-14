@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 # Input limits (per row).
 MAX_TOPIC_CHARS = 200
 MAX_NOTES_CHARS = 1000
+MAX_SHORT_FIELD_CHARS = 100  # audience, tone
 
 # Output structure limits (per draft).
 MAX_CAPTION_CHARS = 2200
@@ -18,6 +19,9 @@ MIN_SLIDES = 5
 MAX_SLIDES = 8
 MIN_SCRIPT_WORDS = 80
 MAX_SCRIPT_WORDS = 200
+
+# Cap on generated tokens per LLM call: room for a full draft, no runaway output.
+MAX_OUTPUT_TOKENS = 2000
 
 LlmProvider = Literal["anthropic", "openai"]
 BackendName = Literal["csv", "sheet"]

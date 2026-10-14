@@ -109,3 +109,47 @@ One short entry per non-obvious choice: what, why, alternatives.
 - **What:** The 2,200-char check measures `caption + "\n\n[ADD RISK DISCLAIMER]"`.
 - **Why:** The final caption, after code appends the placeholder, must still fit the
   platform limit.
+
+## Every real API call passes the rate limiter, including transient retries
+
+- **What:** `RateLimiter.check_and_record()` runs inside the tenacity-retried `_send`, and
+  SDK built-in retries are off (`max_retries=0`).
+- **Why:** The hourly cap should count actual API calls. A 429 retry is still a call.
+  With SDK retries off, tenacity is the single retry policy (3 attempts, exponential wait).
+- **Alternatives:** Check once per `generate_draft` call, as inbox-triage does. That
+  undercounts when retries happen.
+
+## Rate-limit trips end the run; other LLM failures mark the row
+
+- **What:** `LlmError` (provider errors after retries, or output that fails the `Draft`
+  schema) makes that row `Error`. `RateLimitExceededError` propagates out of `process_row`.
+- **Why:** One bad row must not stop the run, but a spent budget applies to every
+  remaining row. Marking them all `Error` would only make work for the reviewer.
+
+## All four text fields are screened and length-limited
+
+- **What:** `audience` and `tone` get the injection screen and a 100-char limit too, not
+  only `topic` and `notes`.
+- **Why:** They are just as untrusted and go into the same prompt. The cost is negligible.
+- **Alternatives:** Screen only `topic` and `notes` as the spec lists. That leaves an
+  obvious bypass.
+
+## Sheet text cannot spoof the data delimiters
+
+- **What:** `build_user_prompt` removes the begin and end marker strings from field values
+  before wrapping them.
+- **Why:** Otherwise a note containing the end marker could "close" the data block and
+  pose as instructions.
+
+## `max_tokens` for the OpenAI-compatible path
+
+- **What:** The OpenAI path sends `max_tokens`, not `max_completion_tokens`.
+- **Why:** Free OpenAI-compatible APIs (Groq, Gemini, OpenRouter) widely accept
+  `max_tokens`. Reasoning-only OpenAI models reject it; switch if one of those is used.
+
+## Tests build real SDK errors with `httpx2`
+
+- **What:** `tests/test_llm.py` imports `httpx2`, which both SDKs already depend on, to
+  construct real `APIStatusError`s.
+- **Why:** Testing `is_transient` against the real exception classes catches SDK changes
+  that a hand-made stand-in would hide. No new dependency is added.
