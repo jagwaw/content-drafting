@@ -153,3 +153,42 @@ One short entry per non-obvious choice: what, why, alternatives.
   construct real `APIStatusError`s.
 - **Why:** Testing `is_transient` against the real exception classes catches SDK changes
   that a hand-made stand-in would hide. No new dependency is added.
+
+## Re-check each row right before writing it
+
+- **What:** Both backends re-read the target row before writing. They refuse with
+  `BackendError` unless it is still `New` with the same topic and id (or a blank id).
+- **Why:** A run takes seconds per row, and the reviewer may be editing the sheet
+  meanwhile. Without the check, a row approved mid-run could be overwritten, or an
+  inserted row could shift the target onto the wrong topic. The sheet costs one extra read
+  per row; the CSV re-reads the file anyway.
+- **Alternatives:** Trust the row numbers from the initial fetch. That is cheaper but
+  breaks the "never touch Approved or Rejected" rule.
+
+## Columns by header name; write only agent columns
+
+- **What:** Columns are found by header name, in any order, and extra columns are kept.
+  The agent writes only `id`, `status` and the agent-owned columns.
+- **Why:** Reviewers rearrange sheets and add their own columns. The agent must not
+  clobber them.
+
+## Flagged and Error results clear the draft columns
+
+- **What:** Non-Drafted results write blank caption, outline and script.
+- **Why:** If a human resets an old row to `New` to redo it, stale draft text must not
+  sit next to a `Flagged` status as if it were the new output.
+
+## Sheet writes are RAW; Sheets-only OAuth scope
+
+- **What:** `batch_update(..., raw=True)`, and the service account requests only the
+  `spreadsheets` scope.
+- **Why:** RAW stores model text as plain text, so output starting with `=` can't become a
+  formula. Dropping gspread's default Drive scope is least privilege.
+- **Limitation:** The CSV backend writes text as-is. A spreadsheet app opening the CSV may
+  treat a cell starting with `=` as a formula. It is a local demo file, so this is
+  documented rather than escaped.
+
+## Atomic CSV writes
+
+- **What:** The CSV is written to a `.tmp` file and swapped in with `os.replace`.
+- **Why:** A crash mid-write can't leave a half-written review file.

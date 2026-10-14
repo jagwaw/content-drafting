@@ -42,10 +42,6 @@ mypy_path = "src"
 files = ["src", "tests"]
 plugins = ["pydantic.mypy"]
 
-[[tool.mypy.overrides]]
-module = ["gspread.*"]
-ignore_missing_imports = true
-
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
