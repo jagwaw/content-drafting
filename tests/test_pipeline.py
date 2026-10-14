@@ -1,4 +1,3 @@
-from collections.abc import Sequence
 from datetime import UTC, datetime
 
 import pytest
@@ -6,36 +5,15 @@ import pytest
 from content_agent.compliance import DISCLAIMER
 from content_agent.guardrails import RateLimitExceededError
 from content_agent.llm import LlmError
-from content_agent.models import Draft, Row, Status
+from content_agent.models import Row, Status
 from content_agent.pipeline import process_row
+from fakes import CLEAN, FakeLlm
 
 NOW = datetime(2026, 10, 15, 8, 30, tzinfo=UTC)
 ROW = Row(row_key=2, id="t1", topic="How a stop-loss protects your account", notes="beginners")
 
-CLEAN = Draft(
-    caption="A stop-loss decides your exit before emotions do.",
-    slides=[f"Slide point {n}" for n in range(6)],
-    script=" ".join(["word"] * 100),
-)
 PROFIT_PROMISE = CLEAN.model_copy(update={"caption": "Guaranteed wins with this stop-loss!"})
 TOO_FEW_SLIDES = CLEAN.model_copy(update={"slides": ["one", "two"]})
-
-
-class FakeLlm:
-    """Returns (or raises) the queued outcomes in order and records every call."""
-
-    model_label = "fake/model"
-
-    def __init__(self, *outcomes: Draft | Exception) -> None:
-        self._outcomes = list(outcomes)
-        self.calls: list[tuple[Row, tuple[str, ...]]] = []
-
-    def generate_draft(self, row: Row, retry_reasons: Sequence[str] = ()) -> Draft:
-        self.calls.append((row, tuple(retry_reasons)))
-        outcome = self._outcomes.pop(0)
-        if isinstance(outcome, Exception):
-            raise outcome
-        return outcome
 
 
 # --- Happy path -----------------------------------------------------------------------

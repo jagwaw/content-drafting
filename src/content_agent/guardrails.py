@@ -50,7 +50,7 @@ class RateLimiter:
         return len(self._timestamps)
 
 
-RunEvent = Literal["run_started", "run_finished", "rate_limit_tripped", "run_error"]
+RunEvent = Literal["run_started", "run_finished", "rate_limit_tripped", "run_error", "write_failed"]
 
 
 @dataclass(frozen=True)

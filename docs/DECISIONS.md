@@ -192,3 +192,32 @@ One short entry per non-obvious choice: what, why, alternatives.
 
 - **What:** The CSV is written to a `.tmp` file and swapped in with `os.replace`.
 - **Why:** A crash mid-write can't leave a half-written review file.
+
+## Dry run still writes the audit log
+
+- **What:** `--dry-run` writes nothing to the sheet or CSV. It still appends audit lines,
+  with `run_started` marked `"dry run"`.
+- **Why:** A dry run makes real LLM calls. "Audit everything" covers those calls even when
+  nothing is saved.
+
+## Exit codes
+
+- **What:** `0` when the run completes (even if rows were Flagged or Error), `1` when the
+  run stopped early (rate limit, or the sheet couldn't be read), `2` for a config error.
+- **Why:** Flagged and Error rows are normal outcomes for a reviewer, not process failures.
+  A scheduler only needs to alert on 1 and 2.
+
+## Failed writes don't stop the run
+
+- **What:** A `BackendError` while writing one row (for example, a human approved it
+  mid-run) is printed, audited as `write_failed` and counted as "Not written". The run
+  continues.
+- **Why:** This follows "one bad row must not stop the run".
+
+## The demo CSV covers every outcome
+
+- **What:** `data/demo_topics.csv` has 5 ordinary topics, 1 profit-pushing topic,
+  1 injection in notes and 1 blank topic.
+- **Why:** One dry run shows Drafted, Flagged and Error side by side. All topics are
+  non-sensitive, so the file is safe to send to free LLM tiers.
+- **Note:** A non-dry run edits this file in place. Use `git checkout data/` to reset it.

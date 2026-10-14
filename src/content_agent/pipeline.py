@@ -16,7 +16,8 @@ from content_agent.models import Draft, Row, RowResult, Status
 
 
 class DraftGenerator(Protocol):
-    model_label: str
+    @property
+    def model_label(self) -> str: ...
 
     def generate_draft(self, row: Row, retry_reasons: Sequence[str] = ()) -> Draft: ...
 
