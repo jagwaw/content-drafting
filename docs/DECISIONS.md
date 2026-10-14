@@ -87,3 +87,25 @@ One short entry per non-obvious choice: what, why, alternatives.
 - **Why:** "Flagged rows get no draft text" and "the agent never sets Approved" become
   facts the type guarantees rather than conventions each caller must remember.
 - **Alternatives:** Check these only in the pipeline. That is easier to bypass from new code.
+
+## Banned words are flagged even when negated
+
+- **What:** "Profits are not guaranteed" is flagged. Only the specific near-misses in the
+  build spec ("no guarantee", "risk management") are let through.
+- **Why:** Negation detection is easy to fool ("not only guaranteed, but..."). A false
+  positive costs one retry with the reason in the prompt; a false negative is a
+  compliance failure. The prompt will tell the model to avoid these words entirely.
+- **Alternatives:** A negation-aware matcher. Revisit if evals show many false positives.
+
+## All compliance checks are hard checks
+
+- **What:** Phrase and structure failures both trigger the single retry, then `Flagged`.
+- **Why:** A 3-slide carousel or a 400-word script is as unusable to the reviewer as a
+  banned phrase. One rule is simpler than two tiers.
+- **Alternatives:** Soft structure warnings that still write the draft.
+
+## Caption limit counts the disclaimer
+
+- **What:** The 2,200-char check measures `caption + "\n\n[ADD RISK DISCLAIMER]"`.
+- **Why:** The final caption, after code appends the placeholder, must still fit the
+  platform limit.
