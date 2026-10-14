@@ -221,3 +221,25 @@ One short entry per non-obvious choice: what, why, alternatives.
 - **Why:** One dry run shows Drafted, Flagged and Error side by side. All topics are
   non-sensitive, so the file is safe to send to free LLM tiers.
 - **Note:** A non-dry run edits this file in place. Use `git checkout data/` to reset it.
+
+## Evaluation runs the real pipeline, one pass, no repeat
+
+- **What:** `evaluate.py` sends every case through `process_row`, the same path the CLI
+  uses, with a real model and no backend. Each check applies only where it makes sense
+  (for example, draft checks only when a draft exists). A case passes when all of its
+  checks pass.
+- **Why:** Scoring the real path means the numbers describe what the reviewer would see.
+  Twelve cases at one call each (two on retry) cost little.
+- **Alternatives:** A `--repeat N` option to measure model variance, as in inbox-triage.
+  Worth adding if results flip between runs.
+
+## Report rendering is its own module
+
+- **What:** `eval_report.py` renders the Markdown; `evaluate.py` runs and scores.
+- **Why:** This keeps both modules well under the ~200-line guideline, split by
+  responsibility.
+
+## Eval results go through the audit log
+
+- **What:** Every eval case's `RowResult` is appended to the audit log.
+- **Why:** Eval runs make real LLM calls; "audit everything" includes them.
