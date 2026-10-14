@@ -1,0 +1,22 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.DS_Store
+
+# Secrets: never commit
+.env
+service_account*.json
+*-service-account.json
+credentials.json
+
+# Audit logs stay local
+audit_logs/*.jsonl
+!audit_logs/.gitkeep
+
+# Private notes
+*.local.md
