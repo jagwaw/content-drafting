@@ -136,6 +136,7 @@ def test_transient_error_is_retried_and_each_call_is_rate_limited(
 
     assert client.generate_draft(ROW) == DRAFT
     assert limiter.calls_in_window == 2
+    assert client.requests_sent == 2
 
 
 @pytest.mark.usefixtures("no_retry_wait")

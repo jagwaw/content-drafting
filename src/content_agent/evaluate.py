@@ -13,7 +13,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict
 
@@ -27,6 +27,8 @@ from content_agent.pipeline import DraftGenerator, process_row
 
 DATASET = Path("evals/topics.jsonl")
 REPORT = Path("evals/results.md")
+# A quota or outage hits every case; after this many in a row, stop instead of scoring them.
+MAX_CONSECUTIVE_PROVIDER_ERRORS = 2
 
 CaseKind = Literal["normal", "adversarial", "injection", "invalid"]
 
@@ -58,6 +60,13 @@ def load_cases(path: Path = DATASET) -> list[EvalCase]:
     return [EvalCase.model_validate_json(line) for line in lines if line.strip()]
 
 
+class EvalLlm(DraftGenerator, Protocol):
+    """A draft generator that also reports how many HTTP requests it has sent."""
+
+    @property
+    def requests_sent(self) -> int: ...
+
+
 class CountingLlm:
     """Wraps a draft generator to count calls, so "no LLM call" can be checked."""
 
@@ -78,8 +87,14 @@ class CountingLlm:
 class CaseResult:
     case: EvalCase
     result: RowResult
-    llm_calls: int
+    llm_calls: int  # draft attempts: 1, or 2 after a compliance retry
+    requests: int  # HTTP requests, including transient-error retries
     seconds: float
+
+    @property
+    def provider_error(self) -> bool:
+        """The model was called but no answer came back (quota, outage, bad output)."""
+        return self.result.status == Status.ERROR and self.llm_calls > 0
 
     @property
     def checks(self) -> dict[str, bool]:
@@ -114,30 +129,52 @@ def _without_disclaimer(draft: Draft) -> Draft:
     )
 
 
+@dataclass(frozen=True)
+class EvalRun:
+    results: list[CaseResult]
+    stopped_early: str = ""  # why the run ended before the last case, if it did
+
+
 def run_eval(
     cases: Sequence[EvalCase],
-    llm: DraftGenerator,
+    llm: EvalLlm,
     *,
     delay: float = 0.0,
     sleep: Callable[[float], None] = time.sleep,
     on_result: Callable[[RowResult], None] = lambda result: None,
-) -> list[CaseResult]:
-    """Run each case once through the real pipeline. Stops early if the rate limit trips."""
-    results = []
+) -> EvalRun:
+    """Run each case once through the real pipeline.
+
+    Stops early if the rate limit trips, or after consecutive provider errors, so an
+    exhausted quota is reported as an incomplete run, not as failed drafts.
+    """
+    results: list[CaseResult] = []
+    streak = 0
     for index, case in enumerate(cases):
         if index and delay:
             sleep(delay)  # stay under free-tier requests-per-minute limits
         counting = CountingLlm(llm)
+        requests_before = llm.requests_sent
         start = time.monotonic()
         try:
             result = process_row(case.to_row(index + 2), counting)
         except RateLimitExceededError as exc:
-            print(f"Stopped early: {exc}", file=sys.stderr)
-            break
+            return EvalRun(results, f"local LLM call budget reached ({exc})")
         on_result(result)
-        results.append(CaseResult(case, result, counting.calls, time.monotonic() - start))
-        print(f"{case.id}: {result.status} ({'pass' if results[-1].passed else 'FAIL'})")
-    return results
+        case_result = CaseResult(
+            case=case,
+            result=result,
+            llm_calls=counting.calls,
+            requests=llm.requests_sent - requests_before,
+            seconds=time.monotonic() - start,
+        )
+        results.append(case_result)
+        print(f"{case.id}: {result.status} ({'pass' if case_result.passed else 'FAIL'})")
+        streak = streak + 1 if case_result.provider_error else 0
+        if streak >= MAX_CONSECUTIVE_PROVIDER_ERRORS:
+            reason = f"{streak} cases in a row got provider errors, likely quota or outage"
+            return EvalRun(results, f"{reason}. Last error: {result.error[:120]}")
+    return EvalRun(results)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -155,15 +192,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     cases = load_cases(args.dataset)
     llm = LlmClient(settings, RateLimiter(settings.max_llm_calls_per_hour))
     audit = AuditLogger(settings.audit_log_dir)
-    results = run_eval(cases, llm, delay=args.delay, on_result=audit.log_row)
+    run = run_eval(cases, llm, delay=args.delay, on_result=audit.log_row)
     meta = {
         "Model": llm.model_label,
         "Run at": datetime.now(UTC).isoformat(timespec="seconds"),
-        "Cases run": f"{len(results)} of {len(cases)}",
+        "Cases run": f"{len(run.results)} of {len(cases)}",
     }
-    args.output.write_text(render_report(results, meta), encoding="utf-8")
+    args.output.write_text(render_report(run, meta), encoding="utf-8")
+    if run.stopped_early:
+        print(f"Stopped early: {run.stopped_early}", file=sys.stderr)
     print(f"Report written to {args.output}")
-    return 0 if len(results) == len(cases) else 1
+    return 0 if len(run.results) == len(cases) else 1
 
 
 if __name__ == "__main__":

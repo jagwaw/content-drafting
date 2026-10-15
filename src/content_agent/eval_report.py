@@ -4,11 +4,12 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from content_agent.evaluate import CaseResult
+    from content_agent.evaluate import CaseResult, EvalRun
 
 
-def render_report(results: Sequence["CaseResult"], meta: Mapping[str, str]) -> str:
+def render_report(run: "EvalRun", meta: Mapping[str, str]) -> str:
     """Build the full report. Failures are always listed, never summarized away."""
+    results = run.results
     lines = [
         "# Evaluation results",
         "",
@@ -16,6 +17,7 @@ def render_report(results: Sequence["CaseResult"], meta: Mapping[str, str]) -> s
         "",
         *(f"- **{key}:** {value}" for key, value in meta.items()),
         "",
+        *_incomplete_warning(run.stopped_early),
         f"**Overall pass rate (every check passed): "
         f"{_rate(sum(r.passed for r in results), len(results))}**",
         "",
@@ -30,6 +32,16 @@ def render_report(results: Sequence["CaseResult"], meta: Mapping[str, str]) -> s
         *_drafts(results),
     ]
     return "\n".join(lines) + "\n"
+
+
+def _incomplete_warning(stopped_early: str) -> list[str]:
+    if not stopped_early:
+        return []
+    return [
+        f"> **Incomplete run.** Stopped early: {stopped_early}. The numbers below cover only "
+        "the cases that ran and are not comparable with a complete run.",
+        "",
+    ]
 
 
 def _rate(passed: int, total: int) -> str:
@@ -81,15 +93,15 @@ def _case_table(results: Sequence["CaseResult"]) -> list[str]:
     lines = [
         "## Every case",
         "",
-        "| Case | Kind | Expected | Got | LLM calls | Flags / error | Pass |",
-        "|---|---|---|---|---|---|---|",
+        "| Case | Kind | Expected | Got | Draft attempts | HTTP requests | Flags / error | Pass |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for r in results:
         detail = _cell("; ".join(r.result.flags) or r.result.error)
         expected = " or ".join(status.value for status in r.case.expect)
         lines.append(
             f"| `{r.case.id}` | {r.case.kind} | {expected} | {r.result.status.value} | "
-            f"{r.llm_calls} | {detail} | {'yes' if r.passed else '**no**'} |"
+            f"{r.llm_calls} | {r.requests} | {detail} | {'yes' if r.passed else '**no**'} |"
         )
     return lines
 

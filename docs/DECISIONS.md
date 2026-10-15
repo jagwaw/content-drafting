@@ -259,3 +259,22 @@ One short entry per non-obvious choice: what, why, alternatives.
   into `LlmError`.
 - **Why:** `openai.LengthFinishReasonError` is not an `APIError`. It escaped and crashed
   the eval run instead of marking one row `Error`. A regression test covers it.
+
+## An exhausted quota ends the eval as "incomplete", not as failed drafts
+
+- **What:** After 2 cases in a row get provider errors (the model was called but no
+  answer came back), the eval stops. The report opens with an "Incomplete run" warning
+  that gives the reason and the last error.
+- **Why:** A second free-tier run hit Gemini's daily quota and scored 8 of 9 model
+  cases as failures, a "33%" that measured the quota, not the agent. A single provider
+  error is still scored as a failure, because one bad row is a real outcome.
+- **Alternatives:** Exclude errored cases from the pass rate. That would hide real
+  failures, so they are still listed, only flagged as an incomplete run.
+
+## Report shows draft attempts and HTTP requests separately
+
+- **What:** `LlmClient.requests_sent` counts every request, including tenacity retries.
+  The report shows "Draft attempts" (1, or 2 after a compliance retry) next to
+  "HTTP requests".
+- **Why:** A case retried 3 times on a 429 used to show "1 LLM call", which understated
+  its cost against the quota.

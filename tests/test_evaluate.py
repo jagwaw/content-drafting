@@ -5,6 +5,7 @@ import pytest
 from content_agent.eval_report import render_report
 from content_agent.evaluate import EvalCase, load_cases, run_eval
 from content_agent.guardrails import RateLimitExceededError, sanitize_for_prompt
+from content_agent.llm import LlmError
 from content_agent.models import RowResult, Status
 from content_agent.pipeline import screen_row, validate_row
 from fakes import CLEAN, FakeLlm
@@ -68,13 +69,13 @@ def test_expected_statuses_match_case_kind(case: EvalCase) -> None:
 
 
 def test_well_behaved_model_passes_every_case() -> None:
-    results = run_eval(CASES, outcomes_for_all_cases_passing())
+    results = run_eval(CASES, outcomes_for_all_cases_passing()).results
 
     assert [r.case.id for r in results if not r.passed] == []
 
 
 def test_injection_cases_make_no_llm_calls() -> None:
-    results = run_eval(CASES, outcomes_for_all_cases_passing())
+    results = run_eval(CASES, outcomes_for_all_cases_passing()).results
 
     for result in results:
         if result.case.kind == "injection":
@@ -83,7 +84,7 @@ def test_injection_cases_make_no_llm_calls() -> None:
 
 
 def test_drafted_case_runs_all_draft_checks() -> None:
-    (result,) = run_eval(by_kind("normal")[:1], FakeLlm(CLEAN))
+    (result,) = run_eval(by_kind("normal")[:1], FakeLlm(CLEAN)).results
 
     assert result.checks == {
         "expected status": True,
@@ -94,7 +95,7 @@ def test_drafted_case_runs_all_draft_checks() -> None:
 
 
 def test_flagged_normal_topic_is_a_failure() -> None:
-    (result,) = run_eval(by_kind("normal")[:1], FakeLlm(PROFIT, PROFIT))
+    (result,) = run_eval(by_kind("normal")[:1], FakeLlm(PROFIT, PROFIT)).results
 
     assert result.passed is False
     assert result.checks == {"expected status": False}
@@ -102,9 +103,9 @@ def test_flagged_normal_topic_is_a_failure() -> None:
 
 
 def test_report_lists_every_failure_with_its_reason() -> None:
-    results = run_eval(by_kind("normal")[:2], FakeLlm(PROFIT, PROFIT, CLEAN))
+    run = run_eval(by_kind("normal")[:2], FakeLlm(PROFIT, PROFIT, CLEAN))
 
-    report = render_report(results, META)
+    report = render_report(run, META)
 
     assert "**Overall pass rate (every check passed): 1/2 (50%)**" in report
     assert "- `normal-stop-loss` (normal): failed expected status." in report
@@ -114,6 +115,8 @@ def test_report_lists_every_failure_with_its_reason() -> None:
 
 def test_report_says_none_when_nothing_failed() -> None:
     report = render_report(run_eval(CASES, outcomes_for_all_cases_passing()), META)
+
+    assert "Incomplete run" not in report
 
     assert "## Failures\n\nNone." in report
     assert "| injection | 2/2 (100%) |" in report
@@ -131,9 +134,10 @@ def test_delay_sleeps_between_cases_only() -> None:
 def test_rate_limit_stops_early_with_partial_results() -> None:
     llm = FakeLlm(CLEAN, RateLimitExceededError("budget spent"))
 
-    results = run_eval(CASES, llm)
+    run = run_eval(CASES, llm)
 
-    assert len(results) == 1
+    assert len(run.results) == 1
+    assert "local LLM call budget reached" in run.stopped_early
 
 
 def test_every_result_is_passed_to_the_callback() -> None:
@@ -142,3 +146,45 @@ def test_every_result_is_passed_to_the_callback() -> None:
     run_eval(by_kind("injection"), FakeLlm(), on_result=seen.append)
 
     assert len(seen) == 2
+
+
+QUOTA = LlmError("RateLimitError: Error code: 429 - quota exceeded")
+
+
+def test_consecutive_provider_errors_stop_the_run_as_incomplete() -> None:
+    run = run_eval(CASES, FakeLlm(CLEAN, QUOTA, QUOTA))
+
+    assert [r.result.status for r in run.results] == [Status.DRAFTED, Status.ERROR, Status.ERROR]
+    assert "2 cases in a row got provider errors" in run.stopped_early
+    assert "429" in run.stopped_early
+
+
+def test_single_provider_error_does_not_stop_the_run() -> None:
+    run = run_eval(by_kind("normal"), FakeLlm(CLEAN, QUOTA, CLEAN, CLEAN, CLEAN, CLEAN))
+
+    assert len(run.results) == 6
+    assert run.stopped_early == ""
+
+
+def test_validation_errors_do_not_count_as_provider_errors() -> None:
+    cases = [*by_kind("normal")[:1], *by_kind("invalid"), *by_kind("normal")[1:3]]
+
+    run = run_eval(cases, FakeLlm(QUOTA, CLEAN, CLEAN))
+
+    assert len(run.results) == 4
+    assert run.stopped_early == ""
+
+
+def test_incomplete_run_is_flagged_at_the_top_of_the_report() -> None:
+    report = render_report(run_eval(CASES, FakeLlm(QUOTA, QUOTA)), META)
+
+    warning = report.index("> **Incomplete run.**")
+    assert warning < report.index("**Overall pass rate")
+    assert "not comparable with a complete run" in report
+
+
+def test_report_shows_draft_attempts_and_http_requests() -> None:
+    report = render_report(run_eval(by_kind("normal")[:1], FakeLlm(PROFIT, CLEAN)), META)
+
+    assert "| Draft attempts | HTTP requests |" in report
+    assert "| Drafted | 2 | 2 |" in report

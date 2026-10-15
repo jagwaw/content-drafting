@@ -21,6 +21,10 @@ class FakeLlm:
         self._outcomes = list(outcomes)
         self.calls: list[tuple[Row, tuple[str, ...]]] = []
 
+    @property
+    def requests_sent(self) -> int:
+        return len(self.calls)
+
     def generate_draft(self, row: Row, retry_reasons: Sequence[str] = ()) -> Draft:
         self.calls.append((row, tuple(retry_reasons)))
         outcome = self._outcomes.pop(0)

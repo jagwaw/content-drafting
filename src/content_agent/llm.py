@@ -88,6 +88,8 @@ class LlmClient:
     def __init__(self, settings: Settings, rate_limiter: RateLimiter) -> None:
         self._settings = settings
         self._rate_limiter = rate_limiter
+        # Every request sent, retries included. Read by the eval report.
+        self.requests_sent = 0
         # SDK retries are off so tenacity is the single retry policy.
         self._anthropic = anthropic.Anthropic(api_key=settings.anthropic_api_key, max_retries=0)
         self._openai = openai.OpenAI(
@@ -116,6 +118,7 @@ class LlmClient:
     )
     def _send(self, user_prompt: str) -> Draft:
         self._rate_limiter.check_and_record()
+        self.requests_sent += 1
         if self._settings.llm_provider == "anthropic":
             return self._send_anthropic(user_prompt)
         return self._send_openai(user_prompt)
