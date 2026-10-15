@@ -50,6 +50,27 @@ curl -X POST http://localhost:5678/webhook-test/draft-content \
 These are single manual runs, not an evaluation set. The scored evaluation is in the Python
 agent (`evals/results.md`).
 
+## Debugging notes
+
+Two failures I caused on purpose to practice finding and fixing them.
+
+**1. Wrong API key (loud failure)**
+- Change: replaced the OpenRouter key in the Bearer credential with a fake one.
+- Symptom: the `Draft with LLM` node turned red with "Authorization failed - please check your
+  credentials". `Compliance check` and `Respond draft` did not run. The `curl` caller got an
+  empty response, so the failure is only visible inside n8n.
+- Found in: the canvas and the node's error message.
+- Fix: restored the real key. The same request then returned `Drafted`.
+- Follow-up: add an error branch so the caller gets `{"status":"Error"}` instead of nothing.
+
+**2. Logic bug in the compliance check (silent failure)**
+- Change: raised the minimum script length in `Compliance check` from 80 to 800 words.
+- Symptom: no error and every node stayed green, but a normal topic came back
+  `Flagged` with "script must be 80-200 words, got 113". The workflow ran fine and returned
+  the wrong answer.
+- Found in: the `flags` text in the response, which named the rule and the actual word count.
+- Fix: changed the limit back to 80. The same request returned `Drafted` again.
+
 ## Limitations
 
 - Triggered by a webhook only; no Google Sheets trigger or write-back yet.
