@@ -243,3 +243,19 @@ One short entry per non-obvious choice: what, why, alternatives.
 
 - **What:** Every eval case's `RowResult` is appended to the audit log.
 - **Why:** Eval runs make real LLM calls; "audit everything" includes them.
+
+## Output cap of 8,000 tokens, sized for reasoning models
+
+- **What:** `MAX_OUTPUT_TOKENS` went from 2,000 to 8,000.
+- **Why:** The first real eval run on Gemini hit the cap with only ~450 visible tokens,
+  because hidden reasoning tokens count toward `max_tokens`. The cap still stops runaway
+  output. The draft's own length is enforced separately by the compliance checks.
+- **Alternatives:** Send `reasoning_effort="low"`. Not every OpenAI-compatible provider
+  accepts it, so the provider-neutral fix is the bigger budget.
+
+## Catch each SDK's base error, not only `APIError`
+
+- **What:** `generate_draft` turns any `anthropic.AnthropicError` or `openai.OpenAIError`
+  into `LlmError`.
+- **Why:** `openai.LengthFinishReasonError` is not an `APIError`. It escaped and crashed
+  the eval run instead of marking one row `Error`. A regression test covers it.

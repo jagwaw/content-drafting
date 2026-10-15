@@ -104,7 +104,8 @@ class LlmClient:
         """Make one draft for `row`. Raises LlmError if no valid draft comes back."""
         try:
             return self._send(build_user_prompt(row, retry_reasons))
-        except (anthropic.APIError, openai.APIError, ValidationError) as exc:
+        # SDK base classes: they also cover non-HTTP failures like output cut off at the limit.
+        except (anthropic.AnthropicError, openai.OpenAIError, ValidationError) as exc:
             raise LlmError(f"{type(exc).__name__}: {exc}"[:300]) from exc
 
     @retry(

@@ -2,6 +2,7 @@ import anthropic
 import httpx2 as httpx
 import openai
 import pytest
+from openai.types.chat import ChatCompletion
 from tenacity import wait_none
 
 from content_agent.config import (
@@ -183,3 +184,17 @@ def test_openai_provider_uses_openai_path(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(client, "_send_anthropic", fake_send(ValueError("wrong provider")))
 
     assert client.generate_draft(ROW) == DRAFT
+
+
+def test_output_cut_off_at_length_limit_is_an_llm_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Regression: Gemini's hidden reasoning tokens used up max_tokens, and the SDK's
+    # LengthFinishReasonError (not an APIError) crashed the whole eval run.
+    client, _ = make_client(provider="openai")
+    completion = ChatCompletion(
+        id="c1", choices=[], created=0, model="gemini", object="chat.completion"
+    )
+    cut_off = openai.LengthFinishReasonError(completion=completion)
+    monkeypatch.setattr(client, "_send_openai", fake_send(cut_off))
+
+    with pytest.raises(LlmError, match="length limit"):
+        client.generate_draft(ROW)

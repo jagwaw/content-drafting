@@ -20,8 +20,10 @@ MAX_SLIDES = 8
 MIN_SCRIPT_WORDS = 80
 MAX_SCRIPT_WORDS = 200
 
-# Cap on generated tokens per LLM call: room for a full draft, no runaway output.
-MAX_OUTPUT_TOKENS = 2000
+# Cap on generated tokens per LLM call, no runaway output. Reasoning models count hidden
+# "thinking" tokens here too (Gemini used ~1,500 before writing a ~450-token draft), so
+# this leaves room for both. The draft's own length is enforced by the compliance checks.
+MAX_OUTPUT_TOKENS = 8000
 
 LlmProvider = Literal["anthropic", "openai"]
 BackendName = Literal["csv", "sheet"]
