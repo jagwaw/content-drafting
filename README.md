@@ -194,6 +194,19 @@ Exit codes: `0` when the run completes (Flagged and Error rows are normal outcom
 when it stops early (LLM budget reached, or the sheet couldn't be read), `2` for a config
 error.
 
+## Google Sheet demo
+
+One run wrote four sample rows back to a real Google Sheet. demo-1 ended Drafted,
+demo-2 Flagged, demo-3 Error because the topic is required, and demo-4 Drafted.
+
+![Google Sheet after one run](docs/demo-sheet.png)
+
+The run used a free model and sample topics only, and results vary from run to run.
+
+```bash
+python -m content_agent.cli run --backend sheet
+```
+
 ## Evaluation
 
 [`evals/topics.jsonl`](evals/topics.jsonl) has 12 labelled cases: 6 normal topics,
