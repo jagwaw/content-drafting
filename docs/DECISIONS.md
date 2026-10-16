@@ -116,6 +116,8 @@ One short entry per non-obvious choice: what, why, alternatives.
   SDK built-in retries are off (`max_retries=0`).
 - **Why:** The hourly cap should count actual API calls. A 429 retry is still a call.
   With SDK retries off, tenacity is the single retry policy (3 attempts, exponential wait).
+  A body with no choices is retried once (see "A body with no choices fails one row,
+  after one retry").
 - **Alternatives:** Check once per `generate_draft` call, as inbox-triage does. That
   undercounts when retries happen.
 
@@ -270,6 +272,20 @@ One short entry per non-obvious choice: what, why, alternatives.
   error is still scored as a failure, because one bad row is a real outcome.
 - **Alternatives:** Exclude errored cases from the pass rate. That would hide real
   failures, so they are still listed, only flagged as an incomplete run.
+
+## A body with no choices fails one row, after one retry
+
+- **What:** If an OpenAI-compatible API returns no `choices` (OpenRouter does this
+  with an error payload, and the SDK then raises `TypeError` while parsing),
+  `generate_draft` raises `LlmResponseError`. It is transient and retried once
+  (`reraise=True`). The row then becomes `Error` and the run continues. The message
+  is `error.message` from the body's extra fields (`model_extra`): one line, at most 200
+  characters, with the API key removed. Headers and the request are not included.
+- **Why:** That `TypeError` is not an `OpenAIError`, so it crashed the whole run.
+  The payload is often a brief provider failure, so one retry is worth it. A second
+  retry would spend the hourly cap on a body that is already an error. 429s and
+  timeouts still get three attempts.
+- **Alternatives:** No retry. A single blip would then mark the row `Error` immediately.
 
 ## Report shows draft attempts and HTTP requests separately
 

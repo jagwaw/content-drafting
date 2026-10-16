@@ -1,10 +1,19 @@
+import csv
+import io
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
 import anthropic
 import httpx2 as httpx
 import openai
 import pytest
+from openai.lib._parsing._completions import parse_chat_completion
 from openai.types.chat import ChatCompletion
 from tenacity import wait_none
 
+from content_agent.backends import COLUMNS, CsvBackend
+from content_agent.cli import EXIT_OK, run
 from content_agent.config import (
     MAX_SCRIPT_WORDS,
     MAX_SLIDES,
@@ -12,17 +21,20 @@ from content_agent.config import (
     MIN_SLIDES,
     load_settings,
 )
-from content_agent.guardrails import RateLimiter, RateLimitExceededError
+from content_agent.guardrails import AuditLogger, RateLimiter, RateLimitExceededError
 from content_agent.llm import (
     DATA_END,
     DATA_START,
     SYSTEM_PROMPT,
     LlmClient,
     LlmError,
+    LlmResponseError,
     build_user_prompt,
     is_transient,
 )
-from content_agent.models import Draft, Row
+from content_agent.models import Draft, Row, Status
+from content_agent.pipeline import process_row
+from fakes import CLEAN
 
 ROW = Row(row_key=2, topic="Position sizing", audience="beginners", tone="plain", notes="n")
 DRAFT = Draft(caption="c", slides=["a"], script="s")
@@ -95,6 +107,10 @@ def test_unrelated_exceptions_are_not_transient() -> None:
     assert is_transient(ValueError("bad output")) is False
 
 
+def test_choiceless_provider_body_is_transient() -> None:
+    assert is_transient(LlmResponseError("provider returned no choices")) is True
+
+
 # --- Client behavior (provider calls faked) --------------------------------------------
 
 
@@ -103,8 +119,14 @@ def no_retry_wait(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(LlmClient._send.retry, "wait", wait_none())
 
 
-def make_client(provider: str = "anthropic", limit: int = 10) -> tuple[LlmClient, RateLimiter]:
-    env = {"LLM_PROVIDER": provider, "ANTHROPIC_API_KEY": "test", "OPENAI_API_KEY": "test"}
+def make_client(
+    provider: str = "anthropic", limit: int = 10, openai_api_key: str = "test"
+) -> tuple[LlmClient, RateLimiter]:
+    env = {
+        "LLM_PROVIDER": provider,
+        "ANTHROPIC_API_KEY": "test",
+        "OPENAI_API_KEY": openai_api_key,
+    }
     limiter = RateLimiter(max_calls_per_hour=limit)
     return LlmClient(load_settings(env), limiter), limiter
 
@@ -199,3 +221,236 @@ def test_output_cut_off_at_length_limit_is_an_llm_error(monkeypatch: pytest.Monk
 
     with pytest.raises(LlmError, match="length limit"):
         client.generate_draft(ROW)
+
+
+# --- OpenRouter body with no choices ---------------------------------------------------
+
+API_KEY = "sk-test-secret-key"
+PROVIDER_MESSAGE = f"upstream busy ({API_KEY})"
+CHOICELESS = "provider returned no choices: upstream busy ([redacted])"
+
+
+class ScriptedCompletions:
+    """Fake chat.completions. parse and create share one queue of responses or errors."""
+
+    def __init__(self, *outcomes: object) -> None:
+        self._outcomes = list(outcomes)
+        self.calls = 0
+
+    def parse(self, **_kwargs: object) -> object:
+        return self._take()
+
+    def create(self, **_kwargs: object) -> object:
+        return self._take()
+
+    def _take(self) -> object:
+        self.calls += 1
+        outcome = self._outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+class LibraryChoicesCrash:
+    """parse() runs the real SDK parser, which TypeErrors when choices is None."""
+
+    def __init__(self, completion: ChatCompletion) -> None:
+        self._completion = completion
+        self.calls = 0
+
+    def parse(self, **_kwargs: object) -> object:
+        self.calls += 1
+        return parse_chat_completion(
+            response_format=Draft,
+            input_tools=[],
+            chat_completion=self._completion,
+        )
+
+
+def choiceless_body(choices: list[object] | None) -> SimpleNamespace:
+    """An OpenRouter-style payload: no choices, error text only in model_extra."""
+    return SimpleNamespace(
+        choices=choices,
+        model_extra={
+            "error": {
+                "message": PROVIDER_MESSAGE,
+                "metadata": {"headers": {"Authorization": f"Bearer {API_KEY}"}},
+            }
+        },
+    )
+
+
+def parsed_body(draft: Draft) -> SimpleNamespace:
+    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(parsed=draft))])
+
+
+def crashed_completion() -> ChatCompletion:
+    completion = ChatCompletion.model_construct(
+        id="c1",
+        choices=[],
+        created=0,
+        model="gemini",
+        object="chat.completion",
+    )
+    completion.choices = None  # type: ignore[assignment]
+    completion.error = {  # type: ignore[attr-defined]
+        "message": PROVIDER_MESSAGE,
+        "metadata": {"authorization": f"Bearer {API_KEY}"},
+    }
+    return completion
+
+
+def use_completions(
+    monkeypatch: pytest.MonkeyPatch, client: LlmClient, completions: object
+) -> None:
+    monkeypatch.setattr(client._openai.chat, "completions", completions)
+
+
+def openai_client() -> LlmClient:
+    client, _ = make_client(provider="openai", openai_api_key=API_KEY)
+    return client
+
+
+def assert_no_secret(text: str) -> None:
+    lowered = text.lower()
+    assert API_KEY not in text
+    assert "bearer" not in lowered
+    assert "authorization" not in lowered
+    assert "header" not in lowered
+
+
+@pytest.mark.usefixtures("no_retry_wait")
+@pytest.mark.parametrize("choices", [None, []])
+def test_missing_or_empty_choices_retries_once_then_raises(
+    choices: list[object] | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = openai_client()
+    completions = ScriptedCompletions(choiceless_body(choices), choiceless_body(choices))
+    use_completions(monkeypatch, client, completions)
+
+    with pytest.raises(LlmResponseError, match="upstream busy") as raised:
+        client.generate_draft(ROW)
+
+    assert str(raised.value) == CHOICELESS
+    assert_no_secret(str(raised.value))
+    assert "\n" not in str(raised.value)
+    assert len(str(raised.value)) <= 200
+    assert completions.calls == 2
+
+
+@pytest.mark.usefixtures("no_retry_wait")
+def test_long_provider_message_is_one_line_and_capped(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = openai_client()
+    huge = "line one\n" + ("word " * 80) + API_KEY
+    body = SimpleNamespace(
+        choices=None,
+        model_extra={
+            "error": {
+                "message": huge,
+                "metadata": {"headers": {"Authorization": f"Bearer {API_KEY}"}},
+            }
+        },
+    )
+    use_completions(monkeypatch, client, ScriptedCompletions(body, body))
+
+    with pytest.raises(LlmResponseError) as raised:
+        client.generate_draft(ROW)
+
+    text = str(raised.value)
+    assert text.startswith("provider returned no choices: line one word")
+    assert "\n" not in text
+    assert len(text) <= 200
+    assert_no_secret(text)
+
+
+@pytest.mark.usefixtures("no_retry_wait")
+def test_choiceless_response_succeeds_when_the_retry_returns_a_draft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = openai_client()
+    completions = ScriptedCompletions(choiceless_body(None), parsed_body(DRAFT))
+    use_completions(monkeypatch, client, completions)
+
+    assert client.generate_draft(ROW) == DRAFT
+    assert completions.calls == 2
+
+
+@pytest.mark.usefixtures("no_retry_wait")
+def test_library_typeerror_on_none_choices_raises_llm_response_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression: OpenRouter returned choices=null and the SDK crashed the run with
+    # TypeError: 'NoneType' object is not iterable inside parse_chat_completion.
+    client = openai_client()
+    completions = LibraryChoicesCrash(crashed_completion())
+    use_completions(monkeypatch, client, completions)
+
+    with pytest.raises(LlmResponseError) as raised:
+        client.generate_draft(ROW)
+
+    assert str(raised.value) == CHOICELESS
+    assert_no_secret(str(raised.value))
+    assert completions.calls == 2
+
+
+def test_unrelated_typeerror_is_not_treated_as_a_choiceless_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = openai_client()
+    completions = ScriptedCompletions(TypeError("bad template"))
+    use_completions(monkeypatch, client, completions)
+
+    with pytest.raises(TypeError, match="bad template"):
+        client.generate_draft(ROW)
+    assert completions.calls == 1
+
+
+@pytest.mark.usefixtures("no_retry_wait")
+def test_choiceless_response_errors_the_row_and_the_run_continues(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    client = openai_client()
+    use_completions(
+        monkeypatch, client, ScriptedCompletions(choiceless_body(None), choiceless_body(None))
+    )
+
+    result = process_row(ROW, client)
+
+    assert result.status == Status.ERROR
+    assert result.draft is None
+    assert result.error == CHOICELESS
+    assert_no_secret(result.error)
+
+    csv_path = tmp_path / "topics.csv"
+    header = ",".join(COLUMNS)
+    csv_path.write_text(
+        header + "\n"
+        "a,Position sizing,beginners,plain,,New,,,,,,,\n"
+        "b,Stop losses,beginners,plain,,New,,,,,,,\n",
+        encoding="utf-8",
+    )
+    runner = openai_client()
+    scripted = ScriptedCompletions(choiceless_body(None), choiceless_body(None), parsed_body(CLEAN))
+    use_completions(monkeypatch, runner, scripted)
+    out = io.StringIO()
+
+    code = run(
+        CsvBackend(csv_path), runner, AuditLogger(tmp_path), limit=10, dry_run=False, out=out
+    )
+
+    assert code == EXIT_OK
+    assert scripted.calls == 3
+    with csv_path.open(newline="", encoding="utf-8") as csv_file:
+        rows = list(csv.DictReader(csv_file))
+    assert rows[0]["status"] == "Error"
+    assert rows[0]["error"] == CHOICELESS
+    assert rows[1]["status"] == "Drafted"
+    logged = [
+        json.loads(line)
+        for path in tmp_path.glob("*.jsonl")
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+    processed = [event for event in logged if event["event"] == "row_processed"]
+    assert [event["outcome"] for event in processed] == ["Error", "Drafted"]
+    assert processed[0]["error"] == CHOICELESS
+    assert_no_secret(json.dumps(processed))

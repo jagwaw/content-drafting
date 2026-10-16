@@ -5,11 +5,12 @@ who calls this. Provider choice stays inside this module.
 """
 
 from collections.abc import Sequence
+from typing import cast
 
 import anthropic
 import openai
 from pydantic import ValidationError
-from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
+from tenacity import RetryCallState, retry, retry_if_exception, wait_exponential
 
 from content_agent.config import (
     MAX_CAPTION_CHARS,
@@ -55,6 +56,13 @@ class LlmError(RuntimeError):
     """The model call failed or returned output that doesn't fit the Draft schema."""
 
 
+class LlmResponseError(LlmError):
+    """The provider returned no choices, usually an error payload instead of a draft."""
+
+
+_MAX_PROVIDER_CHARS = 200
+
+
 def build_user_prompt(row: Row, retry_reasons: Sequence[str] = ()) -> str:
     """Wrap the row's fields in data delimiters, plus check failures from a previous try."""
     fields = {"topic": row.topic, "audience": row.audience, "tone": row.tone, "notes": row.notes}
@@ -72,14 +80,26 @@ def _strip_delimiters(value: str) -> str:
 
 
 def is_transient(exc: BaseException) -> bool:
-    """True for errors worth retrying: 408/409/429, 5xx, timeouts, dropped connections.
+    """True for errors worth retrying: 408/409/429, 5xx, timeouts, dropped connections,
+    and a completion with no choices.
 
     A 400 or 401 fails the same way every time; retrying only hides the real message.
+    A choiceless body is retried once; other transient errors still get three attempts.
     """
+    if isinstance(exc, LlmResponseError):
+        return True
     status = getattr(exc, "status_code", None)
     if status is not None:
         return status in (408, 409, 429) or status >= 500
     return isinstance(exc, anthropic.APIConnectionError | openai.APIConnectionError)
+
+
+def _stop_send(retry_state: RetryCallState) -> bool:
+    """Stop after one retry when the body had no choices, otherwise after three attempts."""
+    outcome = retry_state.outcome
+    exc = outcome.exception() if outcome is not None else None
+    limit = 2 if isinstance(exc, LlmResponseError) else 3
+    return retry_state.attempt_number >= limit
 
 
 class LlmClient:
@@ -112,7 +132,7 @@ class LlmClient:
 
     @retry(
         retry=retry_if_exception(is_transient),
-        stop=stop_after_attempt(3),
+        stop=_stop_send,
         wait=wait_exponential(multiplier=1, min=2, max=20),
         reraise=True,
     )
@@ -145,16 +165,67 @@ class LlmClient:
 
     def _send_openai(self, user_prompt: str) -> Draft:
         # max_tokens rather than max_completion_tokens: more OpenAI-compatible APIs accept it.
-        response = self._openai.chat.completions.parse(
-            model=self._settings.llm_model,
-            max_tokens=MAX_OUTPUT_TOKENS,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ],
-            response_format=Draft,
-        )
-        parsed = response.choices[0].message.parsed
-        if parsed is None:
-            raise LlmError("model returned no parseable draft")
-        return parsed
+        api_key = self._settings.openai_api_key or ""
+        try:
+            response = self._openai.chat.completions.parse(
+                model=self._settings.llm_model,
+                max_tokens=MAX_OUTPUT_TOKENS,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                response_format=Draft,
+            )
+        except TypeError as exc:
+            # The SDK iterates choices and raises when a provider sends choices: null.
+            if not _is_none_choices_type_error(exc):
+                raise
+            found = _completion_from_type_error(exc)
+            raise _choiceless_error(found, api_key) from exc
+        return _draft_from_openai(response, api_key)
+
+
+def _draft_from_openai(response: object, api_key: str) -> Draft:
+    choices = getattr(response, "choices", None)
+    if not isinstance(choices, list) or not choices:
+        raise _choiceless_error(response, api_key)
+    parsed = getattr(getattr(choices[0], "message", None), "parsed", None)
+    if not isinstance(parsed, Draft):
+        raise LlmError("model returned no parseable draft")
+    return parsed
+
+
+def _choiceless_error(response: object | None, api_key: str) -> LlmResponseError:
+    detail = _provider_message(response)
+    text = f"provider returned no choices: {detail}" if detail else "provider returned no choices"
+    if api_key:
+        text = text.replace(api_key, "[redacted]")
+    return LlmResponseError(" ".join(text.split())[:_MAX_PROVIDER_CHARS])
+
+
+def _provider_message(response: object | None) -> str:
+    """The provider's error.message only, from model_extra. Not headers or the request."""
+    extra = getattr(response, "model_extra", None) if response is not None else None
+    error = extra.get("error") if isinstance(extra, dict) else None
+    if isinstance(error, str):
+        return error
+    if isinstance(error, dict):
+        message = error.get("message")
+        return message if isinstance(message, str) else ""
+    return ""
+
+
+def _is_none_choices_type_error(exc: TypeError) -> bool:
+    text = str(exc)
+    return "NoneType" in text and ("iterable" in text or "subscriptable" in text)
+
+
+def _completion_from_type_error(exc: BaseException) -> object | None:
+    # parse() raises before returning, so the parsed body is only still in that frame.
+    frame = exc.__traceback__
+    while frame is not None:
+        completion = frame.tb_frame.f_locals.get("chat_completion")
+        if completion is not None and hasattr(completion, "model_extra"):
+            return cast(object, completion)
+        frame = frame.tb_next
+    return None

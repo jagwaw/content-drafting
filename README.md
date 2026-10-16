@@ -276,7 +276,9 @@ mid-run human edits to the sheet.
 - **Injection screening is a pattern detector.** It catches common attacks, not every
   phrasing. The prompt delimiters and the post-generation checks are further layers.
 - **Free-tier caveats.** Free LLM tiers may train on submitted data and have tight
-  quotas. Use sample topics only.
+  quotas. Use sample topics only. Some of those APIs (OpenRouter) answer an error
+  with no `choices`; that row becomes `Error` after one retry, and the run continues.
+  The stored line is the provider's error text only, not the key or the request.
 - **CSV and formulas.** The CSV is written as-is. A spreadsheet app may treat a cell
   starting with `=` as a formula. The Google Sheet backend writes RAW values and doesn't
   have this problem.
